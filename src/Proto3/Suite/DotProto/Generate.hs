@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP               #-}
-{-# LANGUAGE FlexibleContexts  #-}
+v{-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE NamedFieldPuns    #-}
@@ -232,11 +232,6 @@ hsModuleForDotProto
     -> TypeContext
     -- ^
     -> m HsModule
-hsModuleForDotProto
-    _
-    DotProto { protoMeta = DotProtoMeta { metaModulePath = Path [] } }
-    _ =
-    throwError InternalEmptyModulePath
 hsModuleForDotProto
   (extraImports, extraInstances)
   dotProto@DotProto
