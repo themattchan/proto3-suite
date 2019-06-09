@@ -218,7 +218,7 @@ hsModuleForDotProto
 
     typeContextImports <- ctxtImports importTypeContext
 
-    let hasService = not (null [ () | DotProtoService {} <- protoDefinitions ])
+    let hasService = any (\case DotProtoService {} -> True; _ -> False) protoDefinitions
 
     let importDeclarations =
           concat [ defaultImports hasService, extraImports, typeContextImports ]
@@ -640,29 +640,25 @@ dotProtoMessageD ctxt parentIdent messageIdent message = do
 #endif
                     ]
 
-       conDecl <- recDecl_ (HsIdent messageName) . mconcat <$>
-                  mapM messagePartFieldD message
+       conDecl <- recDecl_ (HsIdent messageName) <$> foldMapM messagePartFieldD message
 
-       nestedDecls_ <- mconcat <$>
-           sequence [ nestedDecls def | DotProtoMessageDefinition def <- message]
+       nestedDecls_ <- foldMapM nestedDecls
+                               [ def | DotProtoMessageDefinition def <- message]
 
-       nestedOneofs_ <- mconcat <$>
-           sequence [ nestedOneOfDecls ident fields | DotProtoMessageOneOf ident fields <- message ]
+       nestedOneofs_ <- foldMapM (uncurry nestedOneOfDecls)
+                                 [ (ident, fields) | DotProtoMessageOneOf ident fields <- message ]
 
        messageInst <- messageInstD ctxt' parentIdent messageIdent message
 
        toJSONPBInst   <- toJSONPBMessageInstD   ctxt' parentIdent messageIdent message
        fromJSONPBInst <- fromJSONPBMessageInstD ctxt' parentIdent messageIdent message
 
-       fieldNames <- sequence $ do
-           messagePart <- message
-           dotProtoIdentifier <- case messagePart of
-                 DotProtoMessageField dotProtoField ->
-                   return (dotProtoFieldName dotProtoField)
-                 DotProtoMessageOneOf dotProtoIdentifier _ ->
-                   return dotProtoIdentifier
-                 _ -> empty
-           return (dpIdentUnqualName dotProtoIdentifier)
+       let getName = \case
+             DotProtoMessageField dotProtoField -> return (dotProtoFieldName dotProtoField)
+             DotProtoMessageOneOf dotProtoIdentifier _ -> return dotProtoIdentifier
+             _ -> empty
+
+       fieldNames <- foldMapM (fmap dpIdentUnqualName . getName) message
 
        toSchemaInstance <- toSchemaInstanceDeclaration messageName fieldNames Nothing
 

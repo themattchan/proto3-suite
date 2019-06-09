@@ -182,14 +182,12 @@ prefixedEnumFieldName :: String -> String -> String
 prefixedEnumFieldName enumName fieldName = enumName <> fieldName
 
 prefixedConName :: MonadError CompileError m => String -> String -> m String
-prefixedConName msgName conName =
-  (msgName ++) <$> typeLikeName conName
+prefixedConName msgName conName = (msgName ++) <$> typeLikeName conName
 
 -- TODO: This should be ~:: MessageName -> FieldName -> ...; same elsewhere, the
 -- String types are a bit of a hassle.
 prefixedFieldName :: MonadError CompileError m => String -> String -> m String
-prefixedFieldName msgName fieldName =
-  (fieldLikeName msgName ++) <$> typeLikeName fieldName
+prefixedFieldName msgName fieldName = (fieldLikeName msgName ++) <$> typeLikeName fieldName
 
 dpIdentUnqualName :: MonadError CompileError m => DotProtoIdentifier -> m String
 dpIdentUnqualName (Single name)       = pure name
@@ -234,13 +232,13 @@ data OneofSubfield = OneofSubfield
 
 getQualifiedFields :: MonadError CompileError m
                    => String -> [DotProtoMessagePart] -> m [QualifiedField]
-getQualifiedFields msgName msgParts = fmap catMaybes . forM msgParts $ \case
+getQualifiedFields msgName msgParts = flip foldMapM msgParts $ \case
   DotProtoMessageField (DotProtoField fieldNum dpType fieldIdent options _) -> do
     fieldName <- dpIdentUnqualName fieldIdent
     qualName  <- prefixedFieldName msgName fieldName
-    pure $ Just $ QualifiedField { recordFieldName = coerce qualName
-                                 , fieldInfo = FieldNormal (coerce fieldName) fieldNum dpType options
-                                 }
+    pure . (:[]) $ QualifiedField { recordFieldName = coerce qualName
+                                  , fieldInfo = FieldNormal (coerce fieldName) fieldNum dpType options
+                                  }
 
   DotProtoMessageOneOf _ [] ->
     throwError (InternalError "getQualifiedFields: encountered oneof with no oneof fields")
@@ -249,17 +247,19 @@ getQualifiedFields msgName msgParts = fmap catMaybes . forM msgParts $ \case
     ident <- dpIdentUnqualName oneofIdent
     oneofName <- prefixedFieldName msgName ident
     oneofTypeName <- prefixedConName msgName ident
-    fieldElems <- sequence
-                    [ do s <- dpIdentUnqualName subFieldName
-                         c <- prefixedConName oneofTypeName s
-                         pure (OneofSubfield fieldNum c (coerce s) dpType options)
-                    | DotProtoField fieldNum dpType subFieldName options _ <- fields
-                    ]
-    pure $ Just $ QualifiedField { recordFieldName = coerce oneofName
-                                 , fieldInfo = FieldOneOf (OneofField ident fieldElems)
-                                 }
-  _ ->
-    pure Nothing
+
+    let mkSubfield (DotProtoField fieldNum dpType subFieldName options _) = do
+            s <- dpIdentUnqualName subFieldName
+            c <- prefixedConName oneofTypeName s
+            pure [OneofSubfield fieldNum c (coerce s) dpType options]
+        mkSubfield DotProtoEmptyField = pure []
+
+    fieldElems <- foldMapM mkSubfield fields
+
+    pure . (:[]) $ QualifiedField { recordFieldName = coerce oneofName
+                                  , fieldInfo = FieldOneOf (OneofField ident fieldElems)
+                                  }
+  _ -> pure []
 
 -- | Project qualified fields, given a projection function per field type.
 onQF :: (FieldName -> FieldNumber -> a) -- ^ projection for normal fields
