@@ -66,6 +66,7 @@ data CompileError
   | CompileParseError       ParseError
   | InternalEmptyModulePath
   | InternalError           String
+  | InvalidPackageName      DotProtoIdentifier
   | InvalidMethodName       DotProtoIdentifier
   | InvalidTypeName         String
   | InvalidMapKeyType       String
@@ -248,6 +249,9 @@ nestedTypeName Anonymous             nm = typeLikeName nm
 nestedTypeName (Single parent)       nm = intercalate "_" <$> traverse typeLikeName [parent, nm]
 nestedTypeName (Dots (Path parents)) nm = intercalate "_" . (<> [nm]) <$> traverse typeLikeName parents
 nestedTypeName (Qualified {})        _  = internalError "nestedTypeName: Qualified"
+
+qualifiedMessageName :: MonadError CompileError m => DotProtoIdentifier -> DotProtoIdentifier -> m String
+qualifiedMessageName parentIdent msgIdent = nestedTypeName parentIdent =<< dpIdentUnqualName msgIdent
 
 -- ** Codegen bookkeeping helpers
 

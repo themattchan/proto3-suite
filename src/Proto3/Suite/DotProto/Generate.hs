@@ -438,16 +438,10 @@ validMapKey = (`elem` [ Int32, Int64, SInt32, SInt64, UInt32, UInt64
 --   field. The latter describes the name of the Haskell module being generated.
 msgTypeFromDpTypeInfo :: MonadError CompileError m
                       => DotProtoTypeInfo -> DotProtoIdentifier -> m HsType
-msgTypeFromDpTypeInfo
-    DotProtoTypeInfo { dotProtoTypeInfoParent = p
-                     , dotProtoTypeInfoModulePath = modulePath
-                     }
-    ident
-  | Path [] <- modulePath = throwError InternalEmptyModulePath
-  | otherwise = do
-       modName <- modulePathModName modulePath
-       identName <- nestedTypeName p =<< dpIdentUnqualName ident
-       pure $ HsTyCon (Qual modName (HsIdent identName))
+msgTypeFromDpTypeInfo DotProtoTypeInfo{..} ident = do
+    modName   <- modulePathModName dotProtoTypeInfoModulePath
+    identName <- qualifiedMessageName dotProtoTypeInfoParent ident
+    pure $ HsTyCon (Qual modName (HsIdent identName))
 
 haskellName, jsonpbName, grpcName, protobufName, proxyName :: String -> HsQName
 haskellName  name = Qual (Module "Hs")         (HsIdent name)
@@ -469,9 +463,9 @@ modulePathModName (Path [])    = throwError InternalEmptyModulePath
 modulePathModName (Path comps) = Module . intercalate "." <$> mapM typeLikeName comps
 
 _pkgIdentModName :: MonadError CompileError m => DotProtoIdentifier -> m Module
-_pkgIdentModName (Single s)          = Module <$> typeLikeName s
-_pkgIdentModName (Dots (Path paths)) = Module . intercalate "." <$> mapM typeLikeName paths
-_pkgIdentModName _                   = internalError "pkgIdentModName: Malformed package name"
+_pkgIdentModName (Single s)  = Module <$> typeLikeName s
+_pkgIdentModName (Dots path) = modulePathModName path
+_pkgIdentModName x           = thowError (InvalidPackageName x)
 
 -- * Generate instances for a 'DotProto' package
 
@@ -511,7 +505,7 @@ dotProtoMessageD
     -> [DotProtoMessagePart]
     -> m [HsDecl]
 dotProtoMessageD ctxt parentIdent messageIdent messageParts = do
-       messageName <- nestedTypeName parentIdent =<< dpIdentUnqualName messageIdent
+       messageName <- qualifiedMessageName parentIdent messageIdent
 
        let ctxt' :: TypeContext
            ctxt' = maybe mempty dotProtoTypeChildContext (M.lookup messageIdent ctxt)
@@ -550,7 +544,7 @@ dotProtoMessageD ctxt parentIdent messageIdent messageParts = do
                     oneOfCons (DotProtoField _ ty fieldName _ _) = do
                        consTy <- case ty of
                             Prim msg@(Named msgName)
-                              | Just DotProtoKindMessage <- dotProtoTypeInfoKind <$> M.lookup msgName ctxt'
+                              | isMessage ctxt' msgName
                                 -> -- Do not wrap message summands with Maybe.
                                    dpptToHsType ctxt' msg
 
@@ -626,11 +620,12 @@ dotProtoMessageD ctxt parentIdent messageIdent messageParts = do
 messageInstD
     :: MonadError CompileError m
     => TypeContext
-    -> DotProtoIdentifier -> DotProtoIdentifier
+    -> DotProtoIdentifier
+    -> DotProtoIdentifier
     -> [DotProtoMessagePart]
     -> m HsDecl
 messageInstD ctxt parentIdent msgIdent messageParts = do
-     msgName <- nestedTypeName parentIdent =<< dpIdentUnqualName msgIdent
+     msgName <- qualifiedMessageName parentIdent msgIdent
      qualifiedFields <- getQualifiedFields msgName messageParts
 
      let encodeMessageField QualifiedField{recordFieldName, fieldInfo} =
@@ -752,7 +747,7 @@ toJSONPBMessageInstD
     -> [DotProtoMessagePart]
     -> m HsDecl
 toJSONPBMessageInstD _ctxt parentIdent msgIdent messageParts = do
-  msgName    <- nestedTypeName parentIdent =<< dpIdentUnqualName msgIdent
+  msgName    <- qualifiedMessageName parentIdent msgIdent
   qualFields <- getQualifiedFields msgName messageParts
 
   -- E.g.
@@ -859,7 +854,7 @@ fromJSONPBMessageInstD
     -> [DotProtoMessagePart]
     -> m HsDecl
 fromJSONPBMessageInstD _ctxt parentIdent msgIdent messageParts = do
-  msgName    <- nestedTypeName parentIdent =<< dpIdentUnqualName msgIdent
+  msgName    <- qualifiedMessageName parentIdent msgIdent
   qualFields <- getQualifiedFields msgName messageParts
 
   let lambdaPVar = patVar "obj"
@@ -1213,7 +1208,7 @@ dotProtoEnumD
     -> [DotProtoEnumPart]
     -> m [HsDecl]
 dotProtoEnumD parentIdent enumIdent enumParts = do
-     enumName <- nestedTypeName parentIdent =<< dpIdentUnqualName enumIdent
+     enumName <- qualifiedMessageName parentIdent enumIdent
 
      enumCons <- fmap (sortBy (comparing fst))
                  $ traverse (traverse (fmap (prefixedEnumFieldName enumName) . dpIdentUnqualName))
