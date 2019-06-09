@@ -13,11 +13,12 @@ module Proto3.Suite.DotProto.Generate.Common where
 import           Control.Applicative
 import           Control.Arrow                  ((&&&))
 import           Control.Monad.Except
-import           Control.Lens                   (ix, over)
+import           Control.Lens                   (Lens', lens, ix, over)
 import           Data.Bifunctor                 (first)
 import           Data.Char
 import           Data.Coerce
 import           Data.Either                    (partitionEithers)
+import           Data.Foldable
 import           Data.List                      (find, intercalate, nub, sortBy,
                                                  stripPrefix)
 import qualified Data.Map                       as M
@@ -55,9 +56,9 @@ liftEither x =
 #endif
 
 foldMapM :: (Foldable t, Monad m, Monoid b) => (a -> m b) -> t a -> m b
-foldMapM f = fmap fold . traverse f
+foldMapM f = foldM (\b a -> (b <>) <$> f a) mempty
 
-mapKeysM :: (Monad m) => (k1 -> m k2) -> M.Map k1 a -> m (M.Map k2 a)
+mapKeysM :: (Monad m, Ord k2) => (k1 -> m k2) -> M.Map k1 a -> m (M.Map k2 a)
 mapKeysM f = fmap M.fromList . traverse (fmap swap . traverse f . swap) . M.assocs
 
 data CompileError
@@ -96,6 +97,9 @@ data DotProtoTypeInfo = DotProtoTypeInfo
     -- ^ The include-relative module path used when importing this module
   } deriving Show
 
+tiParent :: Lens' DotProtoTypeInfo DotProtoIdentifier
+tiParent = lens dotProtoTypeInfoParent (\d p -> d{ dotProtoTypeInfoParent = p })
+
 -- | A mapping from .proto type identifiers to their type information
 type TypeContext = M.Map DotProtoIdentifier DotProtoTypeInfo
 
@@ -110,15 +114,10 @@ dotProtoTypeContext DotProto { protoDefinitions
 definitionTypeContext
     :: MonadError CompileError m => Path -> DotProtoDefinition -> m TypeContext
 definitionTypeContext modulePath (DotProtoMessage msgIdent parts) = do
-  let updateDotProtoTypeInfoParent =
-          fmap (\p -> tyInfo { dotProtoTypeInfoParent = p })
-          . concatDotProtoIdentifier msgIdent
-          . dotProtoTypeInfoParent
+  let updateParent = tiParent (concatDotProtoIdentifier msgIdent)
 
-  childTyContext <-
-      mapM updateDotProtoTypeInfoParent =<<
-        foldMapM (definitionTypeContext modulePath)
-                 [def | DotProtoMessageDefinition def <- parts]
+  childTyContext <- foldMapM (traverse updateParent <=< definitionTypeContext modulePath)
+                             [def | DotProtoMessageDefinition def <- parts]
 
   qualifiedChildTyContext <- mapKeysM (concatDotProtoIdentifier msgIdent) childTyContext
 
@@ -139,20 +138,20 @@ definitionTypeContext modulePath (DotProtoEnum enumIdent _) = do
                                 , dotProtoTypeInfoModulePath = modulePath
                                 }
   pure (M.singleton enumIdent tyInfo)
+
 definitionTypeContext _ _ = pure mempty
 
 concatDotProtoIdentifier :: MonadError CompileError m
                          => DotProtoIdentifier -> DotProtoIdentifier -> m DotProtoIdentifier
 concatDotProtoIdentifier i1 i2 = case (i1, i2) of
-  (Qualified{} ,  _          ) -> internalError "concatDotProtoIdentifier: Qualified"
-  (_           , Qualified{} ) -> internalError "concatDotProtoIdentifier Qualified"
-  (Anonymous   , Anonymous   ) -> pure Anonymous
-  (Anonymous   , b           ) -> pure b
-  (a           , Anonymous   ) -> pure a
-  (Single a    , b           ) -> concatDotProtoIdentifier (Dots (Path [a])) b
-  (a           , Single b    ) -> concatDotProtoIdentifier a (Dots (Path [b]))
-
-concatDotProtoIdentifier (Dots (Path a)) (Dots (Path b)) = pure . Dots . Path $ a ++ b
+  (Qualified{}  ,  _          )  -> internalError "concatDotProtoIdentifier: Qualified"
+  (_            , Qualified{} )  -> internalError "concatDotProtoIdentifier Qualified"
+  (Anonymous    , Anonymous   )  -> pure Anonymous
+  (Anonymous    , b           )  -> pure b
+  (a            , Anonymous   )  -> pure a
+  (Single a     , b           )  -> concatDotProtoIdentifier (Dots (Path [a])) b
+  (a            , Single b    )  -> concatDotProtoIdentifier a (Dots (Path [b]))
+  (Dots (Path a), Dots (Path b)) -> pure (Dots (Path (a ++ b)))
 
 camelCased :: String -> String
 camelCased s = do
