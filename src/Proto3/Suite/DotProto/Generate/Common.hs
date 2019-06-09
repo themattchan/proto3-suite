@@ -27,6 +27,7 @@ import           Data.Ord                       (comparing)
 import qualified Data.Set                       as S
 import           Data.String                    (fromString)
 import qualified Data.Text                      as T
+import           Data.Tuple                     (swap)
 import           Filesystem.Path.CurrentOS      ((</>), (<.>))
 import qualified Filesystem.Path.CurrentOS      as FP
 import           Language.Haskell.Pretty
@@ -53,8 +54,11 @@ liftEither x =
         Right a -> return a
 #endif
 
-foldMapM :: (Foldable t, Monad m, Monoid b) => (a -> m b) -> f a -> m b
-foldMapM f = fmap mconcat . traverse f
+foldMapM :: (Foldable t, Monad m, Monoid b) => (a -> m b) -> t a -> m b
+foldMapM f = fmap fold . traverse f
+
+mapKeysM :: (Monad m) => (k1 -> m k2) -> M.Map k1 a -> m (M.Map k2 a)
+mapKeysM f = fmap M.fromList . traverse (fmap swap . traverse f . swap) . M.assocs
 
 data CompileError
   = CircularImport          FilePath
@@ -101,47 +105,52 @@ dotProtoTypeContext :: MonadError CompileError m => DotProto -> m TypeContext
 dotProtoTypeContext DotProto { protoDefinitions
                              , protoMeta = DotProtoMeta modulePath
                              }
-  = mconcat <$> mapM (definitionTypeContext modulePath) protoDefinitions
+  = foldMapM (definitionTypeContext modulePath) protoDefinitions
 
 definitionTypeContext
     :: MonadError CompileError m => Path -> DotProtoDefinition -> m TypeContext
-definitionTypeContext modulePath (DotProtoMessage msgIdent parts) =
-    do childTyContext <-
-          mapM updateDotProtoTypeInfoParent =<<
-          (mconcat <$> sequenceA
-               [ definitionTypeContext modulePath def
-               | DotProtoMessageDefinition def <- parts ])
+definitionTypeContext modulePath (DotProtoMessage msgIdent parts) = do
+  let updateDotProtoTypeInfoParent =
+          fmap (\p -> tyInfo { dotProtoTypeInfoParent = p })
+          . concatDotProtoIdentifier msgIdent
+          . dotProtoTypeInfoParent
 
-       qualifiedChildTyContext <- M.fromList <$>
-          mapM (\(nm, tyInfo) -> (,tyInfo) <$>
-                                 concatDotProtoIdentifier msgIdent nm)
-               (M.assocs childTyContext)
+  childTyContext <-
+      mapM updateDotProtoTypeInfoParent =<<
+        foldMapM (definitionTypeContext modulePath)
+                 [def | DotProtoMessageDefinition def <- parts]
 
-       pure (M.singleton msgIdent
-                 (DotProtoTypeInfo DotProtoNoPackage Anonymous
-                      childTyContext DotProtoKindMessage modulePath) <>
-               qualifiedChildTyContext)
-  where updateDotProtoTypeInfoParent tyInfo =
-            do dotProtoTypeInfoParent <-
-                     concatDotProtoIdentifier msgIdent (dotProtoTypeInfoParent tyInfo)
-               pure tyInfo { dotProtoTypeInfoParent }
-definitionTypeContext modulePath (DotProtoEnum enumIdent _) =
-  pure (M.singleton enumIdent
-            (DotProtoTypeInfo DotProtoNoPackage Anonymous mempty DotProtoKindEnum modulePath))
+  qualifiedChildTyContext <- mapKeysM (concatDotProtoIdentifier msgIdent) childTyContext
+
+  let tyInfo = DotProtoTypeInfo { dotProtoTypeInfoPackage = DotProtoNoPackage
+                                , dotProtoTypeInfoParent =  Anonymous
+                                , dotProtoTypeChildContext = childTyContext
+                                , dotProtoTypeInfoKind = DotProtoKindMessage
+                                , dotProtoTypeInfoModulePath = modulePath
+                                }
+
+  pure $ M.singleton msgIdent tyInfo <> qualifiedChildTyContext
+
+definitionTypeContext modulePath (DotProtoEnum enumIdent _) = do
+  let tyInfo = DotProtoTypeInfo { dotProtoTypeInfoPackage = DotProtoNoPackage
+                                , dotProtoTypeInfoParent =  Anonymous
+                                , dotProtoTypeChildContext = mempty
+                                , dotProtoTypeInfoKind = DotProtoKindEnum
+                                , dotProtoTypeInfoModulePath = modulePath
+                                }
+  pure (M.singleton enumIdent tyInfo)
 definitionTypeContext _ _ = pure mempty
 
 concatDotProtoIdentifier :: MonadError CompileError m
                          => DotProtoIdentifier -> DotProtoIdentifier -> m DotProtoIdentifier
-
-concatDotProtoIdentifier Qualified{} _ = internalError "concatDotProtoIdentifier: Qualified"
-concatDotProtoIdentifier _ Qualified{} = internalError "concatDotProtoIdentifier Qualified"
-
-concatDotProtoIdentifier Anonymous Anonymous = pure Anonymous
-concatDotProtoIdentifier Anonymous b = pure b
-concatDotProtoIdentifier a Anonymous = pure a
-
-concatDotProtoIdentifier (Single a) b = concatDotProtoIdentifier (Dots (Path [a])) b
-concatDotProtoIdentifier a (Single b) = concatDotProtoIdentifier a (Dots (Path [b]))
+concatDotProtoIdentifier i1 i2 = case (i1, i2) of
+  (Qualified{} ,  _          ) -> internalError "concatDotProtoIdentifier: Qualified"
+  (_           , Qualified{} ) -> internalError "concatDotProtoIdentifier Qualified"
+  (Anonymous   , Anonymous   ) -> pure Anonymous
+  (Anonymous   , b           ) -> pure b
+  (a           , Anonymous   ) -> pure a
+  (Single a    , b           ) -> concatDotProtoIdentifier (Dots (Path [a])) b
+  (a           , Single b    ) -> concatDotProtoIdentifier a (Dots (Path [b]))
 
 concatDotProtoIdentifier (Dots (Path a)) (Dots (Path b)) = pure . Dots . Path $ a ++ b
 
@@ -149,24 +158,25 @@ camelCased :: String -> String
 camelCased s = do
   (prev, cur) <- zip (Nothing:map Just s) (map Just s ++ [Nothing])
   case (prev, cur) of
-    (Just '_', Just x) | isAlpha x -> pure (toUpper x)
-    (Just '_', Nothing) -> pure '_'
+    (Just '_', Just x)
+      | isAlpha x        -> pure (toUpper x)
+    (Just '_', Nothing)  -> pure '_'
     (Just '_', Just '_') -> pure '_'
-    (_, Just '_') -> empty
-    (_, Just x) -> pure x
-    (_, _) -> empty
+    (_, Just '_')        -> empty
+    (_, Just x)          -> pure x
+    (_, _)               -> empty
 
 typeLikeName :: MonadError CompileError m => String -> m String
-typeLikeName ident@(firstChar:remainingChars)
-  | isUpper firstChar = pure (camelCased ident)
-  | isLower firstChar = pure (camelCased (toUpper firstChar:remainingChars))
-  | firstChar == '_'  = pure (camelCased ('X':ident))
+typeLikeName ident@(c:cs)
+  | isUpper c = pure (camelCased ident)
+  | isLower c = pure (camelCased (toUpper c : cs))
+  | '_'  == c = pure (camelCased ('X':ident))
 typeLikeName ident = invalidTypeNameError ident
 
 fieldLikeName :: String -> String
-fieldLikeName ident@(firstChar:_)
-  | isUpper firstChar = let (prefix, suffix) = span isUpper ident
-                        in map toLower prefix ++ suffix
+fieldLikeName ident@(c:_)
+  | isUpper c = let (prefix, suffix) = span isUpper ident
+                in map toLower prefix ++ suffix
 fieldLikeName ident = ident
 
 prefixedEnumFieldName :: String -> String -> String
@@ -223,15 +233,15 @@ data OneofSubfield = OneofSubfield
   , subfieldOptions  :: [DotProtoOption]
   } deriving Show
 
-getQualifiedFields
-    :: MonadError CompileError m
-    => String -> [DotProtoMessagePart] -> m [QualifiedField]
+getQualifiedFields :: MonadError CompileError m
+                   => String -> [DotProtoMessagePart] -> m [QualifiedField]
 getQualifiedFields msgName msgParts = fmap catMaybes . forM msgParts $ \case
   DotProtoMessageField (DotProtoField fieldNum dpType fieldIdent options _) -> do
     fieldName <- dpIdentUnqualName fieldIdent
     qualName  <- prefixedFieldName msgName fieldName
-    pure $ Just $
-      QualifiedField (coerce qualName) (FieldNormal (coerce fieldName) fieldNum dpType options)
+    pure $ Just $ QualifiedField { recordFieldName = coerce qualName
+                                 , fieldInfo = FieldNormal (coerce fieldName) fieldNum dpType options
+                                 }
 
   DotProtoMessageOneOf _ [] ->
     throwError (InternalError "getQualifiedFields: encountered oneof with no oneof fields")
@@ -246,8 +256,9 @@ getQualifiedFields msgName msgParts = fmap catMaybes . forM msgParts $ \case
                          pure (OneofSubfield fieldNum c (coerce s) dpType options)
                     | DotProtoField fieldNum dpType subFieldName options _ <- fields
                     ]
-    pure $ Just $ QualifiedField (coerce oneofName) (FieldOneOf (OneofField ident fieldElems))
-
+    pure $ Just $ QualifiedField { recordFieldName = coerce oneofName
+                                 , fieldInfo = FieldOneOf (OneofField ident fieldElems)
+                                 }
   _ ->
     pure Nothing
 

@@ -208,14 +208,17 @@ hsModuleForDotProto
 hsModuleForDotProto
   (extraImports, extraInstances)
   dotProto@DotProto
-    { protoPackage     = DotProtoPackageSpec packageIdentifier
+    { protoPackage
     , protoMeta        = DotProtoMeta { metaModulePath = modulePath }
     , protoDefinitions
     }
   importTypeContext = do
+    packageIdentifier <- protoPackageName protoPackage
     moduleName <- modulePathModName modulePath
 
     typeContextImports <- ctxtImports importTypeContext
+
+    let hasService = not (null [ () | DotProtoService {} <- protoDefinitions ])
 
     let importDeclarations =
           concat [ defaultImports hasService, extraImports, typeContextImports ]
@@ -225,19 +228,13 @@ hsModuleForDotProto
     let toDotProtoDeclaration =
           dotProtoDefinitionD packageIdentifier (typeContext <> importTypeContext)
 
-    let instances = instancesForModule moduleName extraInstances
+    let extraInstances' = instancesForModule moduleName extraInstances
 
-    listOfDeclarations <- traverse toDotProtoDeclaration protoDefinitions
+    decls <- replaceHsInstDecls extraInstances' <$>
+              foldMapM toDotProtoDeclaration protoDefinitions
 
-    let overridenDeclarations =
-          replaceHsInstDecls instances (mconcat listOfDeclarations)
+    return (module_ moduleName Nothing importDeclarations decls)
 
-    return (module_ moduleName Nothing importDeclarations overridenDeclarations)
-  where
-    hasService = not (null [ () | DotProtoService {} <- protoDefinitions ])
-
-hsModuleForDotProto _ _ _ =
-  throwError NoPackageDeclaration
 
 -- This very specific function will only work for the qualification on the very first type
 -- in the object of an instance declaration. Those are the only sort of instance declarations
@@ -328,17 +325,15 @@ readImportTypeContext searchPaths toplevelFP alreadyRead (DotProtoImport _ path)
                                              }
          importTypeContext <- map fixImportTyInfo <$> dotProtoTypeContext import_
 
-         qualifiedTypeContext <- M.fromList <$>
-             mapM (\(nm, tyInfo) -> (,tyInfo) <$> concatDotProtoIdentifier importPkg nm)
-                  (M.assocs importTypeContext')
+         qualifiedTypeContext <- mapKeysM (concatDotProtoIdentifier importPkg) importTypeContext
 
          let recur = readImportTypeContext searchPaths toplevelFP (S.insert path alreadyRead)
 
-         publicImportsTCRec <- foldMapM recur
+         publicImportTCs <- foldMapM recur
                                . filter ((== DotProtoImportPublic) . dotProtoImportQualifier)
                                $ protoImports import_
 
-         pure $ importTypeContext <> qualifiedTypeContext <> publicImportsTCRec
+         pure $ importTypeContext <> qualifiedTypeContext <> publicImportTCs
 
 -- | Given a type context, generates the import statements necessary
 --   to import all the required types.
@@ -548,11 +543,14 @@ _pkgIdentModName _                   = internalError "pkgIdentModName: Malformed
 dotProtoDefinitionD
     :: MonadError CompileError m
     => DotProtoIdentifier -> TypeContext -> DotProtoDefinition -> m [HsDecl]
-dotProtoDefinitionD _ ctxt (DotProtoMessage messageName dotProtoMessage) =
+dotProtoDefinitionD pkgIdent ctxt = \case
+  DotProtoMessage messageName dotProtoMessage ->
     dotProtoMessageD ctxt Anonymous messageName dotProtoMessage
-dotProtoDefinitionD _ _ (DotProtoEnum messageName dotProtoEnum) =
+
+  DotProtoEnum messageName dotProtoEnum ->
     dotProtoEnumD Anonymous messageName dotProtoEnum
-dotProtoDefinitionD pkgIdent ctxt (DotProtoService serviceName dotProtoService) =
+
+  DotProtoService serviceName dotProtoService ->
     dotProtoServiceD pkgIdent ctxt serviceName dotProtoService
 
 -- | Generate 'Named' instance for a type in this package
