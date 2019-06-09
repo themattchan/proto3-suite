@@ -96,12 +96,9 @@ compileDotProtoFile
 
     Turtle.mktree (Turtle.directory modulePath)
 
-    listOfExtraInstances <- traverse getExtraInstances extraInstanceFiles
+    extraInstances <- foldMapM getExtraInstances extraInstanceFiles
 
-    let extraInstances = mconcat listOfExtraInstances
-
-    haskellModule <- do
-      renderHsModuleForDotProto extraInstances dotProto importTypeContext
+    haskellModule <- renderHsModuleForDotProto extraInstances dotProto importTypeContext
 
     liftIO (writeFile (FP.encodeString modulePath) haskellModule)
 
@@ -146,11 +143,10 @@ getExtraInstances
     :: (MonadIO m, MonadError CompileError m)
     => FilePath -> m ([HsImportDecl], [HsDecl])
 getExtraInstances extraInstanceFile = do
-  let extraInstanceFileString = FP.encodeString extraInstanceFile
 
-  parseRes <- parseModule <$> liftIO (readFile extraInstanceFileString)
+  contents <- liftIO (readFile (FP.encodeString extraInstanceFile))
 
-  case parseRes of
+  case parseModule contents of
     ParseOk (HsModule _srcloc _mod _es idecls decls) -> do
       let isInstDecl HsInstDecl{} = True
           isInstDecl _            = False
@@ -231,7 +227,7 @@ hsModuleForDotProto
     let extraInstances' = instancesForModule moduleName extraInstances
 
     decls <- replaceHsInstDecls extraInstances' <$>
-              foldMapM toDotProtoDeclaration protoDefinitions
+             foldMapM toDotProtoDeclaration protoDefinitions
 
     return (module_ moduleName Nothing importDeclarations decls)
 
@@ -509,8 +505,8 @@ msgTypeFromDpTypeInfo
 -- of this type, generate the corresponding Haskell name
 nestedTypeName :: MonadError CompileError m => DotProtoIdentifier -> String -> m String
 nestedTypeName Anonymous             nm = typeLikeName nm
-nestedTypeName (Single parent)       nm = intercalate "_" <$> sequenceA [ typeLikeName parent , typeLikeName nm ]
-nestedTypeName (Dots (Path parents)) nm = intercalate "_" . (<>[nm]) <$> mapM typeLikeName parents
+nestedTypeName (Single parent)       nm = intercalate "_" <$> traverse typeLikeName [parent, nm]
+nestedTypeName (Dots (Path parents)) nm = intercalate "_" . (<> [nm]) <$> traverse typeLikeName parents
 nestedTypeName (Qualified {})        _  = internalError "nestedTypeName: Qualified"
 
 haskellName, jsonpbName, grpcName, protobufName, proxyName
@@ -531,11 +527,11 @@ dhallPBName name = Qual (Module hsDhallPB) (HsIdent name)
 
 modulePathModName :: MonadError CompileError m => Path -> m Module
 modulePathModName (Path [])    = throwError InternalEmptyModulePath
-modulePathModName (Path comps) = Module <$> (intercalate "." <$> mapM typeLikeName comps)
+modulePathModName (Path comps) = Module . intercalate "." <$> mapM typeLikeName comps
 
 _pkgIdentModName :: MonadError CompileError m => DotProtoIdentifier -> m Module
 _pkgIdentModName (Single s)          = Module <$> typeLikeName s
-_pkgIdentModName (Dots (Path paths)) = Module <$> (intercalate "." <$> mapM typeLikeName paths)
+_pkgIdentModName (Dots (Path paths)) = Module . intercalate "." <$> mapM typeLikeName paths
 _pkgIdentModName _                   = internalError "pkgIdentModName: Malformed package name"
 
 -- * Generate instances for a 'DotProto' package
@@ -643,7 +639,7 @@ dotProtoMessageD ctxt parentIdent messageIdent message = do
        conDecl <- recDecl_ (HsIdent messageName) <$> foldMapM messagePartFieldD message
 
        nestedDecls_ <- foldMapM nestedDecls
-                               [ def | DotProtoMessageDefinition def <- message]
+                                [ def | DotProtoMessageDefinition def <- message]
 
        nestedOneofs_ <- foldMapM (uncurry nestedOneOfDecls)
                                  [ (ident, fields) | DotProtoMessageOneOf ident fields <- message ]
@@ -882,7 +878,7 @@ toJSONPBMessageInstD _ctxt parentIdent msgIdent messageParts = do
                 let patVarNm = oneofSubBinder sub
                 pure $ alt_ (HsPApp (haskellName "Just")
                                     [ HsPParen
-                                      $ HsPApp (unqual_ conName) [patVar patVarNm]
+                                      (HsPApp (unqual_ conName) [patVar patVarNm])
                                     ]
                             )
                             (HsUnGuardedAlt (pairE pbFldNm patVarNm))
@@ -1445,7 +1441,7 @@ dotProtoServiceD pkgIdent ctxt serviceIdent service = do
 
          serviceFieldD _ = pure []
 
-     fieldsD <- mconcat <$> mapM serviceFieldD service
+     fieldsD <- foldMapM serviceFieldD service
 
      serverFuncName <- prefixedFieldName serviceName "server"
      clientFuncName <- prefixedFieldName serviceName "client"
