@@ -1,3 +1,14 @@
+{-# LANGUAGE CPP               #-}
+{-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE MultiWayIf        #-}
+{-# LANGUAGE NamedFieldPuns    #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes       #-}
+{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE ViewPatterns      #-}
+
 module Proto3.Suite.DotProto.Generate.Common where
 import           Control.Applicative
 import           Control.Arrow                  ((&&&))
@@ -26,8 +37,6 @@ import           Prelude                        hiding (FilePath)
 import           Proto3.Suite.DotProto
 import           Proto3.Suite.DotProto.Rendering (Pretty(..))
 import           Proto3.Suite.DotProto.Internal
-import           Proto3.Suite.DotProto.Generate.Common
---import           Proto3.Suite.DotProto.Generate.Purescript
 import           Proto3.Wire.Types              (FieldNumber (..))
 import           System.IO                      (writeFile, readFile)
 import           Text.Parsec                    (ParseError)
@@ -36,9 +45,16 @@ import qualified Turtle
 import           Turtle.Format                  ((%))
 import qualified Turtle.Format                  as F
 
+#if !(MIN_VERSION_mtl(2,2,2))
+liftEither :: MonadError e m => Either e a -> m a
+liftEither x =
+    case x of
+        Left  e -> throwError e
+        Right a -> return a
+#endif
 
-
--- * Public interface
+foldMapM :: (Foldable t, Monad m, Monoid b) => (a -> m b) -> f a -> m b
+foldMapM f = fmap mconcat . traverse f
 
 data CompileError
   = CircularImport          FilePath
@@ -52,14 +68,6 @@ data CompileError
   | NoSuchType              DotProtoIdentifier
   | Unimplemented           String
   deriving (Show, Eq)
-
-#if !(MIN_VERSION_mtl(2,2,2))
-liftEither :: MonadError e m => Either e a -> m a
-liftEither x =
-    case x of
-        Left  e -> throwError e
-        Right a -> return a
-#endif
 
 
 -- * Type-tracking data structures
@@ -277,4 +285,8 @@ invalidMethodNameError :: MonadError CompileError m => DotProtoIdentifier -> m a
 invalidMethodNameError = throwError . InvalidMethodName
 
 noSuchTypeError :: MonadError CompileError m => DotProtoIdentifier -> m a
-noSuchTypeError = throwError. NoSuchType
+noSuchTypeError = throwError . NoSuchType
+
+protoPackageName :: MonadError CompileError m => DotProtoPackageSpec -> m DotProtoIdentifier
+protoPackageName (DotProtoPackageSpec name) = pure name
+protoPackageName DotProtoNoPackage = throwError NoPackageDeclaration

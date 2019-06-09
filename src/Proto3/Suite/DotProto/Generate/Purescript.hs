@@ -36,10 +36,13 @@ import           Text.Parsec                    (ParseError)
 import Text.PrettyPrint as PP
 
 
--- simple purescript ast dsl
+-- * PureScript abstract syntax.
+-- Here we mainly recycle the haskell abstract syntax provided by
+-- haskell-src. The main difference to account for are Purescript's records,
+-- which we do by providing a hacked up prettyprinter.
 
 
-
+---------------------------------------------------------------------
 
 dotProtoToPurescript
   :: MonadError CompileError m

@@ -60,6 +60,9 @@ import           Turtle                         (FilePath)
 import qualified Turtle
 import           Turtle.Format                  ((%))
 import qualified Turtle.Format                  as F
+
+-- * Public interface
+
 -- | Generate a Haskell module corresponding to a @.proto@ file
 compileDotProtoFile
     :: [FilePath]
@@ -300,7 +303,7 @@ readDotProtoWithContext searchPaths toplevelProto = runExceptT $ do
     parse mp fp = parseProtoFile mp fp >>= \case
       Right dp -> do
         let importIt = readImportTypeContext searchPaths toplevelProto (S.singleton toplevelProto)
-        tc <- mconcat <$> mapM importIt (protoImports dp)
+        tc <- foldMapM importIt (protoImports dp)
         pure (dp, tc)
       Left err -> throwError (CompileParseError err)
 
@@ -316,36 +319,35 @@ readImportTypeContext
     -> m TypeContext
 readImportTypeContext searchPaths toplevelFP alreadyRead (DotProtoImport _ path)
   | path `S.member` alreadyRead = throwError (CircularImport path)
-  | otherwise =
-      do import_ <- liftEither . first CompileParseError =<< importProto searchPaths toplevelFP path
-         case protoPackage import_ of
-           DotProtoPackageSpec importPkg ->
-             do importTypeContext <- dotProtoTypeContext import_
-                let importTypeContext' = flip fmap importTypeContext $ \tyInfo ->
-                      tyInfo { dotProtoTypeInfoPackage    = DotProtoPackageSpec importPkg
-                             , dotProtoTypeInfoModulePath = metaModulePath . protoMeta $ import_
-                             }
-                    qualifiedTypeContext = M.fromList <$>
-                        mapM (\(nm, tyInfo) -> (,tyInfo) <$> concatDotProtoIdentifier importPkg nm)
-                            (M.assocs importTypeContext')
+  | otherwise = do
+         import_ <- liftEither . first CompileParseError =<< importProto searchPaths toplevelFP path
+         importPkg <- protoPackageName (protoPackage import_)
 
-                importTypeContext'' <- (importTypeContext' <>) <$> qualifiedTypeContext
-                (importTypeContext'' <>) . mconcat <$> sequence
-                    [ readImportTypeContext searchPaths toplevelFP (S.insert path alreadyRead) importImport
-                    | importImport@(DotProtoImport DotProtoImportPublic _) <- protoImports import_
-                    ]
-           _ -> throwError NoPackageDeclaration
+         let fixImportTyInfo tyInfo = tyInfo { dotProtoTypeInfoPackage    = DotProtoPackageSpec importPkg
+                                             , dotProtoTypeInfoModulePath = metaModulePath . protoMeta $ import_
+                                             }
+         importTypeContext <- map fixImportTyInfo <$> dotProtoTypeContext import_
+
+         qualifiedTypeContext <- M.fromList <$>
+             mapM (\(nm, tyInfo) -> (,tyInfo) <$> concatDotProtoIdentifier importPkg nm)
+                  (M.assocs importTypeContext')
+
+         let recur = readImportTypeContext searchPaths toplevelFP (S.insert path alreadyRead)
+
+         publicImportsTCRec <- foldMapM recur
+                               . filter ((== DotProtoImportPublic) . dotProtoImportQualifier)
+                               $ protoImports import_
+
+         pure $ importTypeContext <> qualifiedTypeContext <> publicImportsTCRec
 
 -- | Given a type context, generates the import statements necessary
 --   to import all the required types.
 ctxtImports :: MonadError CompileError m => TypeContext -> m [HsImportDecl]
-ctxtImports tyCtxt =
-  do imports <- nub <$> sequence
-                          [ modulePathModName modulePath
-                          | DotProtoTypeInfo { dotProtoTypeInfoModulePath = modulePath }
-                             <- M.elems tyCtxt
-                          ]
-     pure [ importDecl_ modName True Nothing Nothing | modName <- imports ]
+ctxtImports = fmap (mkImport . nub)
+            . traverse (modulePathModName . dotProtoTypeInfoModulePath)
+            . M.elems
+  where
+    mkImport modName = importDecl_ modName True Nothing Nothing
 
 -- * Functions to convert 'DotProtoType' into Haskell types
 
